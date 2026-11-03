@@ -31,6 +31,28 @@ use crate::{
     metrics::{default_duration_buckets, default_size_buckets, Histogram, Metrics},
 };
 
+/// DigiByte Core 9.x Oracle/DigiDollar P2P commands.
+///
+/// These messages are not needed by the current indexer, but they must remain
+/// part of the parsed protocol surface so that a newer Core can introduce them
+/// without terminating the P2P connection. Their payloads are retained for a
+/// future Oracle/DigiDollar implementation.
+const DIGIBYTE_ORACLE_COMMANDS: &[&str] = &[
+    "oracleprice",
+    "oraclebundle",
+    "getoracles",
+    "oracleconsns",
+    "oracleattest",
+    "oramusnonce",
+    "oramusigctx",
+    "oramusigpsig",
+    "oraclehb",
+];
+
+fn is_digibyte_oracle_command(command: &str) -> bool {
+    DIGIBYTE_ORACLE_COMMANDS.contains(&command)
+}
+
 enum Request {
     GetNewHeaders(GetHeadersMessage),
     GetBlocks(Vec<Inventory>),
@@ -261,6 +283,12 @@ impl Connection {
                         }
                     };
 
+                    trace!(
+                        "recv: command={}, payload_len={}",
+                        raw_msg.cmd,
+                        raw_msg.raw.len()
+                    );
+
                     let label = format!("parse_{}", raw_msg.cmd.as_ref());
                     let msg = match parse_duration.observe_duration(&label, || raw_msg.parse()) {
                         Ok(msg) => msg,
@@ -288,6 +316,13 @@ impl Connection {
                         }
                         ParsedNetworkMessage::Block(block) => blocks_send.send(block)?,
                         ParsedNetworkMessage::Headers(headers) => headers_send.send(headers)?,
+                        ParsedNetworkMessage::Oracle { command, payload } => {
+                            debug!(
+                                "received DigiByte Oracle message: command={}, payload_len={}",
+                                command,
+                                payload.len()
+                            );
+                        }
                         ParsedNetworkMessage::Ignored => (),
                     }
                 }
@@ -375,6 +410,10 @@ impl RawNetworkMessage {
             "feefilter" => ParsedNetworkMessage::Ignored,
             "addr" => ParsedNetworkMessage::Ignored, // unused
             "alert" => ParsedNetworkMessage::Ignored, // https://bitcoin.org/en/alert/2016-11-01-alert-retirement
+            command if is_digibyte_oracle_command(command) => ParsedNetworkMessage::Oracle {
+                command: command.to_owned(),
+                payload: self.raw,
+            },
             _ => bail!(
                 "unsupported message: command={}, payload={:?}",
                 self.cmd,
@@ -393,6 +432,7 @@ enum ParsedNetworkMessage {
     Ping(u64),
     Headers(Vec<BlockHeader>),
     Block(SerBlock),
+    Oracle { command: String, payload: Vec<u8> },
     Ignored,
 }
 
@@ -415,4 +455,46 @@ impl Decodable for RawNetworkMessage {
 pub fn duration_to_seconds(d: Duration) -> f64 {
     let nanos = f64::from(d.subsec_nanos()) / 1e9;
     d.as_secs() as f64 + nanos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digibyte_oracle_messages_are_parsed_and_retained() {
+        let payload = vec![0x01, 0x02, 0x03];
+
+        for command in DIGIBYTE_ORACLE_COMMANDS {
+            let raw = RawNetworkMessage {
+                magic: Magic::BITCOIN,
+                cmd: CommandString::try_from_static(command).unwrap(),
+                raw: payload.clone(),
+            };
+
+            match raw.parse().unwrap() {
+                ParsedNetworkMessage::Oracle {
+                    command: parsed_command,
+                    payload: parsed_payload,
+                } => {
+                    assert_eq!(parsed_command, *command);
+                    assert_eq!(parsed_payload, payload);
+                }
+                other => panic!("expected Oracle message, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_non_digibyte_command_is_still_rejected() {
+        let raw = RawNetworkMessage {
+            magic: Magic::BITCOIN,
+            cmd: CommandString::try_from_static("futuremsg").unwrap(),
+            raw: vec![],
+        };
+
+        let error = raw.parse().unwrap_err().to_string();
+        assert!(error.contains("unsupported message"));
+        assert!(error.contains("futuremsg"));
+    }
 }
