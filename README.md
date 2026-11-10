@@ -65,7 +65,8 @@ protocol port used between the containers and does not alter DigiByte RPC port
 - A storage dataset for the DigiByte node data.
 - A separate dataset for the electrs RocksDB index and logs.
 - Enough storage for the DigiByte blockchain and the electrs index.
-- A synchronized DigiByte node image, such as `blocknetdx/digibyte:latest`.
+- The published DigiByte Core image from [digibyte-docker](https://github.com/digibyte-electrum/digibyte-docker):
+  `ghcr.io/digibyte-electrum/digibyte-core@sha256:fd28db137e1f6ab7a794c7a144efbacfff63ad455301f5fd87820708c4f9e98f`.
 - The DigiByte electrs image published by this project:
   `ghcr.io/digibyte-electrum/electrs:digibyte-support`.
 
@@ -76,54 +77,66 @@ generic paths and credentials; do not copy production passwords from examples.
 
 In TrueNAS, open **Apps**, choose **Discover Apps** or **Launch Docker Image**
 (the wording depends on the TrueNAS release), select the Custom App/YAML
-workflow, and create the node first. Paste the following Compose-compatible
-custom YAML:
+workflow, and create the node first. Follow the deployment documentation in
+[digibyte-docker](https://github.com/digibyte-electrum/digibyte-docker) to create
+the data and configuration datasets. The configuration dataset must contain a
+`digibyte.conf` file similar to this, with a unique password:
+
+```ini
+server=1
+txindex=1
+listen=1
+port=12024
+rpcport=14022
+rpcbind=0.0.0.0
+rpcallowip=172.30.0.0/24
+rpcuser=dgb_electrum
+rpcpassword=CHANGE_THIS_TO_A_LONG_RANDOM_PASSWORD
+```
+
+The data and configuration paths must be writable/readable by UID/GID 1000,
+which is the user used by the DigiByte image. Then paste this
+Compose-compatible Custom App YAML:
 
 ```yaml
 networks:
   dgb-electrum-net:
     driver: bridge
     name: dgb-electrum-net
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
 
 services:
   digibyte:
-    command: >-
-      digibyted -server=1 -listen=1 -txindex=1 -dbcache=256 -maxmempool=64
-      -par=0 -rpcuser=dgb_electrum
-      -rpcpassword=CHANGE_THIS_TO_A_LONG_RANDOM_PASSWORD
-      -rpcbind=0.0.0.0 -rpcallowip=127.0.0.1/32
-      -rpcallowip=192.168.1.0/24 -rpcallowip=172.16.0.0/12
-      -rpcport=14022 -maxconnections=32
-    container_name: dgb_full_node
-    deploy:
-      resources:
-        limits:
-          cpus: '6.0'
-          memory: 8G
-        reservations:
-          memory: 4096M
-    image: blocknetdx/digibyte:latest
+    image: ghcr.io/digibyte-electrum/digibyte-core@sha256:fd28db137e1f6ab7a794c7a144efbacfff63ad455301f5fd87820708c4f9e98f
+    user: "1000:1000"
+    command:
+      - -datadir=/opt/blockchain/data
+      - -conf=/opt/blockchain/config/digibyte.conf
     networks:
       dgb-electrum-net:
-        aliases:
-          - digibyte
+        ipv4_address: 172.30.0.2
     ports:
-      - '14022:14022'
       - '12024:12024'
     restart: unless-stopped
+    stop_grace_period: 2m
+    mem_limit: 4g
+    cpus: "2.0"
     volumes:
       - /mnt/<pool>/apps/digibyte-data:/opt/blockchain/data
+      - /mnt/<pool>/apps/digibyte-config:/opt/blockchain/config:ro
 ```
 
 Replace the following values before deploying:
 
 - `/mnt/<pool>/apps/digibyte-data` with the TrueNAS dataset path for the node.
-- `CHANGE_THIS_TO_A_LONG_RANDOM_PASSWORD` with a long unique RPC password.
-- `192.168.1.0/24` with the trusted LAN CIDR, if different.
+- `/mnt/<pool>/apps/digibyte-config` with the TrueNAS dataset path containing `digibyte.conf`.
+- `CHANGE_THIS_TO_A_LONG_RANDOM_PASSWORD` with a long unique RPC password in that file.
 
 The RPC username and password must match the values in the electrs configuration.
 The RPC allow-list should be as narrow as possible. Do not publish port `14022`
-to the Internet, and do not reuse the RPC password for another service.
+to the host or Internet, and do not reuse the RPC password for another service.
 
 Start the node and wait for it to finish its initial DigiByte synchronization.
 Confirm that the container is healthy and that `txindex` has completed its
@@ -202,54 +215,50 @@ The node and electrs containers must share the Docker network
 containers do not need to communicate through the host IP address. Only electrs
 needs to publish an external port for wallet connections.
 
-Save the following as `digibyte-node.yml`, replacing the data path and RPC
-password before starting it:
+Use the [digibyte-docker Linux Compose guide](https://github.com/digibyte-electrum/digibyte-docker#docker-compose-para-linux)
+to create the DigiByte node. When it runs alongside this electrs Compose
+project, use the shared network name `dgb-electrum-net` and configure the node
+with an external `digibyte.conf` file. The node service should be equivalent to:
 
 ```yaml
 networks:
   dgb-electrum-net:
     driver: bridge
     name: dgb-electrum-net
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
 
 services:
   digibyte:
-    command: >-
-      digibyted -server=1 -listen=1 -txindex=1 -dbcache=256 -maxmempool=64
-      -par=0 -rpcuser=dgb_electrum
-      -rpcpassword=CHANGE_THIS_TO_A_LONG_RANDOM_PASSWORD
-      -rpcbind=0.0.0.0 -rpcallowip=127.0.0.1/32
-      -rpcallowip=192.168.1.0/24 -rpcallowip=172.16.0.0/12
-      -rpcport=14022 -maxconnections=32
-    container_name: dgb_full_node
-    deploy:
-      resources:
-        limits:
-          cpus: '6.0'
-          memory: 8G
-        reservations:
-          memory: 4096M
-    image: blocknetdx/digibyte:latest
+    image: ghcr.io/digibyte-electrum/digibyte-core@sha256:fd28db137e1f6ab7a794c7a144efbacfff63ad455301f5fd87820708c4f9e98f
+    user: "1000:1000"
+    command:
+      - -datadir=/opt/blockchain/data
+      - -conf=/opt/blockchain/config/digibyte.conf
     networks:
       dgb-electrum-net:
-        aliases:
-          - digibyte
+        ipv4_address: 172.30.0.2
     ports:
-      - '14022:14022'
       - '12024:12024'
     restart: unless-stopped
+    stop_grace_period: 2m
+    mem_limit: 4g
+    cpus: "2.0"
     volumes:
       - /srv/digibyte/data:/opt/blockchain/data
+      - /srv/digibyte/config:/opt/blockchain/config:ro
 ```
 
 The node's RPC port does not need to be published to the host because electrs
-uses the Docker network. If host-side RPC access is required for administration,
-publish `14022:14022` only to a trusted interface or restrict it with firewall
-rules. Never expose the RPC port publicly.
+uses the Docker network. The `/srv/digibyte/config` directory must contain the
+same `digibyte.conf` settings described in the digibyte-docker guide. Never
+expose the RPC port publicly.
 
 Create the node and electrs applications from their respective Compose files:
 
 ```bash
-docker compose -f digibyte-node.yml up -d
+docker compose -f compose.yml up -d
 docker compose -f electrs-docker-compose.yml up -d
 ```
 
